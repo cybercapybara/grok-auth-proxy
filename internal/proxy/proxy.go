@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/moveeeax/grok-auth-proxy/internal/auth"
+	"github.com/cybercapybara/grok-auth-proxy/internal/auth"
 )
 
 // TokenProvider supplies upstream access tokens.

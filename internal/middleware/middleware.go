@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
-	"github.com/moveeeax/grok-auth-proxy/internal/store"
+	"github.com/cybercapybara/grok-auth-proxy/internal/store"
 )
 
 const (
