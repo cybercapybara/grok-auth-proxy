@@ -11,6 +11,9 @@ services:
       GAP_AUTH_FILE: /config/auth.json
       GAP_DB_DRIVER: sqlite
       GAP_DB_DSN: /data/proxy.db
+    # Host auth.json is often mode 0600; named volumes are root-owned.
+    # Run as root for local compose; image default remains non-root.
+    user: "0:0"
     volumes:
       # rw: proxy writes refreshed tokens back to auth.json
       - ${AUTH_JSON_PATH:-./auth.json}:/config/auth.json
