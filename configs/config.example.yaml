@@ -12,8 +12,11 @@ auth:
   # account: ""  # optional map key prefix filter
 
 db:
-  driver: "sqlite" # sqlite | postgres
-  dsn: "./data/proxy.db"
+  # Prefer postgres in production (no local PVC required).
+  driver: "postgres" # sqlite | postgres
+  dsn: "host=localhost user=proxy password=proxy dbname=proxy port=5432 sslmode=disable"
+  # driver: "sqlite"
+  # dsn: "./data/proxy.db"
 
 rate_limit:
   rps: 10
@@ -26,6 +29,11 @@ cors:
 log:
   level: "info"
   redact: true
+
+# Proxied request/response bodies stored in DB (admin /admin/audit).
+audit:
+  enabled: true
+  max_body_bytes: 65536
 
 metrics:
   enabled: true

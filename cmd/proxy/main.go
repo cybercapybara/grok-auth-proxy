@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -42,6 +44,22 @@ func run() error {
 	}
 	defer func() { _ = st.Close() }()
 
+	// Prefer auth blob from DB (survives pod restart without PVC) over bootstrap file.
+	var initial []byte
+	if blob, updated, err := st.LoadAuthState(); err != nil {
+		log.Warn("load auth state from db failed", zap.Error(err))
+	} else if len(blob) > 0 {
+		initial = blob
+		log.Info("using auth state from database", zap.Time("updated_at", updated))
+	}
+
+	// Ensure auth path directory exists when we materialize DB state to disk.
+	if len(initial) > 0 {
+		if dir := filepath.Dir(cfg.Auth.File); dir != "" && dir != "." {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+	}
+
 	authMgr, err := auth.NewManager(auth.Options{
 		Path:        cfg.Auth.File,
 		Issuer:      cfg.Auth.Issuer,
@@ -49,9 +67,27 @@ func run() error {
 		Account:     cfg.Auth.Account,
 		RefreshSkew: cfg.Auth.RefreshSkew,
 		Log:         log.Named("auth"),
+		InitialData: initial,
+		Persist: func(data auth.FileData) error {
+			b, err := json.MarshalIndent(data, "", "  ")
+			if err != nil {
+				return err
+			}
+			return st.SaveAuthState(b)
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
+	}
+	// Also seed DB from file on first boot when DB had no state.
+	if len(initial) == 0 {
+		if raw, err := os.ReadFile(cfg.Auth.File); err == nil && len(raw) > 0 {
+			if err := st.SaveAuthState(raw); err != nil {
+				log.Warn("seed auth state to db failed", zap.Error(err))
+			} else {
+				log.Info("seeded auth state to database from file")
+			}
+		}
 	}
 	if err := authMgr.StartWatch(); err != nil {
 		log.Warn("auth file watch disabled", zap.Error(err))

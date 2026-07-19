@@ -45,6 +45,10 @@ func (e Entry) resolvedIssuer() string {
 // FileData is the top-level map structure of auth.json.
 type FileData map[string]Entry
 
+// PersistFunc is called after a successful token refresh with the full auth map.
+// Use it to store credentials in an external DB when the auth file is read-only.
+type PersistFunc func(data FileData) error
+
 // Manager loads, refreshes, and watches Grok auth.json credentials.
 type Manager struct {
 	path        string
@@ -54,6 +58,7 @@ type Manager struct {
 	refreshSkew time.Duration
 	httpClient  *http.Client
 	log         *zap.Logger
+	persist     PersistFunc
 
 	mu            sync.RWMutex
 	mapKey        string
@@ -76,6 +81,11 @@ type Options struct {
 	RefreshSkew time.Duration
 	HTTPClient  *http.Client
 	Log         *zap.Logger
+	// Persist is optional; invoked after refresh (and best-effort file write).
+	Persist PersistFunc
+	// InitialData, if non-empty, is loaded instead of reading Path first
+	// (e.g. auth blob restored from Postgres). Path is still used for later writes/watch.
+	InitialData []byte
 }
 
 // NewManager creates a Manager and loads credentials from disk.
@@ -104,10 +114,19 @@ func NewManager(opts Options) (*Manager, error) {
 		refreshSkew: opts.RefreshSkew,
 		httpClient:  opts.HTTPClient,
 		log:         opts.Log,
+		persist:     opts.Persist,
 		stopCh:      make(chan struct{}),
 	}
 
-	if err := m.Reload(); err != nil {
+	if len(opts.InitialData) > 0 {
+		if err := m.loadBytes(opts.InitialData); err != nil {
+			return nil, err
+		}
+		// Best-effort materialize to path so watchers / admins see current state.
+		if err := writeAuthFileAtomic(m.path, m.fileData); err != nil {
+			m.log.Debug("could not write initial auth data to file", zap.Error(err))
+		}
+	} else if err := m.Reload(); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -202,6 +221,10 @@ func (m *Manager) Reload() error {
 	if err != nil {
 		return fmt.Errorf("read auth file: %w", err)
 	}
+	return m.loadBytes(data)
+}
+
+func (m *Manager) loadBytes(data []byte) error {
 	var fd FileData
 	if err := json.Unmarshal(data, &fd); err != nil {
 		return fmt.Errorf("parse auth file: %w", err)
@@ -387,12 +410,19 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	m.writing = true
 	m.mu.Unlock()
 
+	if m.persist != nil {
+		if err := m.persist(fdCopy); err != nil {
+			m.log.Warn("failed to persist refreshed auth to store", zap.Error(err))
+		}
+	}
+
 	if err := writeAuthFileAtomic(m.path, fdCopy); err != nil {
 		m.mu.Lock()
 		m.writing = false
 		m.mu.Unlock()
 		m.log.Warn("failed to write refreshed auth.json", zap.Error(err))
-		// In-memory update still applied
+		// In-memory (+ optional DB) update still applied
+		m.log.Info("access token refreshed", zap.Time("expires_at", newEntry.ExpiresAt))
 		return nil
 	}
 

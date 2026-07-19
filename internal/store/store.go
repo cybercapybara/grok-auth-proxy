@@ -39,6 +39,53 @@ type APIKey struct {
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 }
 
+// AuthState stores the latest auth.json payload so token refresh survives
+// restarts without a writable PVC (e.g. external Postgres only).
+type AuthState struct {
+	ID        string    `gorm:"primaryKey;size:32" json:"id"`
+	Payload   []byte    `gorm:"not null" json:"-"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+const AuthStateDefaultID = "default"
+
+// AuditLog is one proxied client request for admin audit.
+type AuditLog struct {
+	ID               string    `gorm:"primaryKey;size:36" json:"id"`
+	CreatedAt        time.Time `gorm:"index" json:"created_at"`
+	RequestID        string    `gorm:"size:64;index" json:"request_id"`
+	APIKeyID         string    `gorm:"size:36;index" json:"api_key_id,omitempty"`
+	APIKeyName       string    `gorm:"size:128" json:"api_key_name,omitempty"`
+	APIKeyPrefix     string    `gorm:"size:32" json:"api_key_prefix,omitempty"`
+	Method           string    `gorm:"size:16" json:"method"`
+	Path             string    `gorm:"size:512;index" json:"path"`
+	Query            string    `gorm:"size:1024" json:"query,omitempty"`
+	ClientIP         string    `gorm:"size:64" json:"client_ip,omitempty"`
+	UserAgent        string    `gorm:"size:512" json:"user_agent,omitempty"`
+	StatusCode       int       `gorm:"index" json:"status_code"`
+	LatencyMS        int64     `json:"latency_ms"`
+	Model            string    `gorm:"size:128;index" json:"model,omitempty"`
+	Stream           bool      `json:"stream"`
+	RequestBody      string    `gorm:"type:text" json:"request_body,omitempty"`
+	ResponseBody     string    `gorm:"type:text" json:"response_body,omitempty"`
+	RequestTruncated bool      `json:"request_truncated"`
+	ResponseTruncated bool     `json:"response_truncated"`
+	Error            string    `gorm:"size:1024" json:"error,omitempty"`
+}
+
+// AuditListFilter filters audit log queries.
+type AuditListFilter struct {
+	APIKeyID  string
+	Path      string
+	Model     string
+	StatusMin *int
+	StatusMax *int
+	From      *time.Time
+	To        *time.Time
+	Limit     int
+	Offset    int
+}
+
 // CreateKeyResult is returned once on key creation (includes plaintext).
 type CreateKeyResult struct {
 	Key       APIKey `json:"key"`
@@ -74,7 +121,7 @@ func Open(driver, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	if err := db.AutoMigrate(&APIKey{}); err != nil {
+	if err := db.AutoMigrate(&APIKey{}, &AuthState{}, &AuditLog{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &Store{db: db}, nil
@@ -182,6 +229,110 @@ var ErrNotFound = errors.New("api key not found")
 
 // ErrUnauthorized is returned when a key is invalid or revoked.
 var ErrUnauthorized = errors.New("invalid api key")
+
+// SaveAuthState upserts the full auth.json payload.
+func (s *Store) SaveAuthState(payload []byte) error {
+	if len(payload) == 0 {
+		return errors.New("empty auth payload")
+	}
+	rec := AuthState{
+		ID:        AuthStateDefaultID,
+		Payload:   payload,
+		UpdatedAt: time.Now().UTC(),
+	}
+	return s.db.Save(&rec).Error
+}
+
+// LoadAuthState returns the stored auth.json payload, or nil if missing.
+func (s *Store) LoadAuthState() ([]byte, time.Time, error) {
+	var rec AuthState
+	err := s.db.First(&rec, "id = ?", AuthStateDefaultID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, time.Time{}, nil
+	}
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return rec.Payload, rec.UpdatedAt, nil
+}
+
+// InsertAuditLog persists one audit row.
+func (s *Store) InsertAuditLog(row *AuditLog) error {
+	if row == nil {
+		return errors.New("nil audit log")
+	}
+	if row.ID == "" {
+		id, err := randomHex(16)
+		if err != nil {
+			return err
+		}
+		row.ID = id
+	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	return s.db.Create(row).Error
+}
+
+// GetAuditLog returns one audit entry by id.
+func (s *Store) GetAuditLog(id string) (*AuditLog, error) {
+	var rec AuditLog
+	err := s.db.First(&rec, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// ListAuditLogs returns audit rows matching filter (newest first).
+func (s *Store) ListAuditLogs(f AuditListFilter) ([]AuditLog, int64, error) {
+	if f.Limit <= 0 {
+		f.Limit = 50
+	}
+	if f.Limit > 500 {
+		f.Limit = 500
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+
+	q := s.db.Model(&AuditLog{})
+	if f.APIKeyID != "" {
+		q = q.Where("api_key_id = ?", f.APIKeyID)
+	}
+	if f.Path != "" {
+		q = q.Where("path = ?", f.Path)
+	}
+	if f.Model != "" {
+		q = q.Where("model = ?", f.Model)
+	}
+	if f.StatusMin != nil {
+		q = q.Where("status_code >= ?", *f.StatusMin)
+	}
+	if f.StatusMax != nil {
+		q = q.Where("status_code <= ?", *f.StatusMax)
+	}
+	if f.From != nil {
+		q = q.Where("created_at >= ?", *f.From)
+	}
+	if f.To != nil {
+		q = q.Where("created_at <= ?", *f.To)
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var rows []AuditLog
+	if err := q.Order("created_at desc").Limit(f.Limit).Offset(f.Offset).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
+}
 
 func generatePlaintext() (string, error) {
 	b, err := randomHex(randomKeyBytes)

@@ -84,6 +84,7 @@ func TestE2EAdminAndProxy(t *testing.T) {
 		CORS:      config.CORSConfig{AllowedOrigins: []string{"*"}},
 		Log:       config.LogConfig{Level: "error", Redact: true},
 		Metrics:   config.MetricsConfig{Enabled: false, Path: "/metrics"},
+		Audit:     config.AuditConfig{Enabled: true, MaxBodyBytes: 65536},
 	}
 
 	srv, err := server.New(server.Dependencies{
@@ -163,6 +164,46 @@ func TestE2EAdminAndProxy(t *testing.T) {
 	engine.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("chat=%d %s", w.Code, w.Body.String())
+	}
+
+	// Audit is written asynchronously
+	deadline := time.Now().Add(2 * time.Second)
+	var auditList struct {
+		Total int `json:"total"`
+		Items []struct {
+			ID    string `json:"id"`
+			Model string `json:"model"`
+			Path  string `json:"path"`
+		} `json:"items"`
+	}
+	for {
+		w = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/admin/audit?path=/v1/chat/completions", nil)
+		req.Header.Set("Authorization", "Bearer admin-secret")
+		engine.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("audit list=%d %s", w.Code, w.Body.String())
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &auditList); err != nil {
+			t.Fatal(err)
+		}
+		if auditList.Total >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for audit log")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if auditList.Items[0].Model != "grok-4.5" {
+		t.Fatalf("audit model=%s", auditList.Items[0].Model)
+	}
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/admin/audit/"+auditList.Items[0].ID, nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	engine.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit get=%d %s", w.Code, w.Body.String())
 	}
 
 	// Unauthorized without key

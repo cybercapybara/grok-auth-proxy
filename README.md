@@ -7,7 +7,9 @@ OpenAI-compatible HTTP proxy for Grok (xAI). Clients use **your** API keys; the 
 - `POST /v1/chat/completions` and `GET /v1/models` (streaming SSE supported)
 - Local API key management (create / list / revoke) with hashed storage
 - Reads `auth.json` (Grok CLI format), OIDC token refresh, file watch
-- SQLite by default; PostgreSQL optional
+- SQLite or **external PostgreSQL** (recommended; no PVC required)
+- Auth token refresh persisted to DB (`auth_states`) so pods stay stateless
+- Request/response **audit log** in DB with admin API (`/admin/audit`)
 - Rate limiting (global + per-key), CORS, Prometheus metrics
 - Graceful shutdown, `/health` and `/ready`
 - Docker Compose ready
@@ -101,12 +103,14 @@ Priority: **flags → env (`GAP_*`) → config file → defaults**.
 | `GAP_AUTH_REFRESH_SKEW` | `5m` | Refresh before expiry |
 | `GAP_AUTH_ISSUER` | `https://auth.x.ai` | OIDC issuer |
 | `GAP_AUTH_CLIENT_ID` | | OIDC client id (if not in auth entry) |
-| `GAP_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
+| `GAP_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` (prefer postgres in prod) |
 | `GAP_DB_DSN` | `./data/proxy.db` | SQLite path or Postgres DSN |
 | `GAP_RATE_LIMIT_RPS` | `10` | Default RPS per API key |
 | `GAP_RATE_LIMIT_BURST` | `20` | Burst size |
 | `GAP_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` |
 | `GAP_LOG_REDACT` | `true` | Redact secrets in logs |
+| `GAP_AUDIT_ENABLED` | `true` | Store request/response bodies in DB |
+| `GAP_AUDIT_MAX_BODY_BYTES` | `65536` | Max body size stored per side |
 | `GAP_METRICS_ENABLED` | `true` | Prometheus metrics |
 | `GAP_CONFIG` | | Optional config file path |
 
@@ -143,13 +147,16 @@ Auth: `Authorization: Bearer <admin_key>` or `X-Admin-Key: <admin_key>`.
 | `GET` | `/admin/keys` | List keys (no secrets) |
 | `DELETE` | `/admin/keys/:id` | Revoke key |
 | `POST` | `/admin/reload-auth` | Reload `auth.json` from disk |
+| `GET` | `/admin/audit` | List audit logs (query filters) |
+| `GET` | `/admin/audit/:id` | Get one audit entry (includes bodies) |
 
 ## Security notes
 
 - API keys are stored as **bcrypt** hashes (plus a SHA-256 lookup key); plaintext is returned **only once** on create.
 - The real Grok access/refresh tokens are never returned to clients and are redacted from logs when `GAP_LOG_REDACT=true`.
-- Mount `auth.json` carefully: the process may rewrite it after token refresh (needs **rw** volume).
-- Single-replica is the safe default with SQLite + local `auth.json`. For multi-replica, use Postgres and a shared strategy for credentials (future work).
+- Refreshed Grok credentials are also stored in the DB (`auth_states`), so a **read-only** auth Secret + external Postgres works **without PVC**.
+- Audit rows may contain full prompts/completions — protect `/admin` and the database.
+- Prefer **Postgres** for multi-replica / no-PVC deploys. SQLite still works for local single-node.
 
 ## Development
 

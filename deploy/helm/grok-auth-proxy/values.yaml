@@ -1,9 +1,13 @@
-# Single-replica by default: SQLite + local auth.json write-back is not multi-writer safe.
+# Single-replica is fine with external Postgres; no PVC required.
+# Auth token refresh is persisted to the database (auth_states table).
 #
 # For real clusters, copy values.production.example.yaml to a private file outside
 # the repo (or values-private.yaml, which is gitignored). Never commit real
 # hostnames, public IPs, or cluster-specific names.
 replicaCount: 1
+
+strategy:
+  type: RollingUpdate
 
 image:
   repository: moveeeax/grok-auth-proxy
@@ -45,20 +49,29 @@ resources:
 # Non-secret configuration (rendered into ConfigMap / env)
 config:
   serverAddr: ":8080"
-  # Writable path on the data PVC (seeded from Secret via init container).
-  authFile: /data/auth.json
+  # When seedToDataVolume=false, mount auth secret here (read-only).
+  authFile: /config/auth.json
   upstreamBase: https://api.x.ai/v1
   refreshSkew: 5m
   # Optional fallbacks if auth.json lacks oidc_client_id / oidc_issuer (Grok CLI fields).
   issuer: ""
   clientId: ""
-  dbDriver: sqlite
-  dbDsn: /data/proxy.db
+  # Prefer external Postgres in production (no PVC).
+  dbDriver: postgres
+  # Used only if database.existingSecret is empty (dev). Prefer secret for real DSN.
+  dbDsn: "host=postgres user=proxy password=proxy dbname=proxy port=5432 sslmode=disable"
   rateLimitRps: "10"
   rateLimitBurst: "20"
   logLevel: info
   logRedact: "true"
   metricsEnabled: "true"
+  auditEnabled: "true"
+  auditMaxBodyBytes: "65536"
+
+# External Postgres DSN (recommended). Key should contain the full libpq/GORM DSN.
+database:
+  existingSecret: ""
+  secretKey: dsn
 
 # Admin key: create a Secret and reference it here.
 admin:
@@ -67,14 +80,17 @@ admin:
   # Only for local/dev — prefer existingSecret in production.
   value: ""
 
-# Grok auth.json bootstrap Secret → seeded onto data PVC (writable).
+# Grok auth.json bootstrap Secret.
+# seedToDataVolume=false: mount secret directly at config.authFile (no PVC).
+# Token refresh is stored in Postgres (auth_states); file write may fail on RO mount (OK).
 auth:
   existingSecret: ""
   secretKey: auth.json
-  seedToDataVolume: true
+  seedToDataVolume: false
 
+# Disabled by default — use external Postgres instead of SQLite on a volume.
 persistence:
-  enabled: true
+  enabled: false
   storageClass: ""
   accessModes:
     - ReadWriteOnce

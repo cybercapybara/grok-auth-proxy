@@ -63,3 +63,57 @@ func TestRevokeNotFound(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestAuthStateAndAudit(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	payload := []byte(`{"k":{"key":"x","refresh_token":"r"}}`)
+	if err := s.SaveAuthState(payload); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.LoadAuthState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("auth state mismatch: %s", got)
+	}
+
+	row := &AuditLog{
+		RequestID:  "req-1",
+		Method:     "POST",
+		Path:       "/v1/chat/completions",
+		StatusCode: 200,
+		Model:      "grok-4.5",
+		RequestBody: `{"model":"grok-4.5"}`,
+		ResponseBody: `{"ok":true}`,
+	}
+	if err := s.InsertAuditLog(row); err != nil {
+		t.Fatal(err)
+	}
+	if row.ID == "" {
+		t.Fatal("expected id")
+	}
+	one, err := s.GetAuditLog(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.Model != "grok-4.5" {
+		t.Fatalf("model=%s", one.Model)
+	}
+	list, total, err := s.ListAuditLogs(AuditListFilter{Path: "/v1/chat/completions", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(list) != 1 {
+		t.Fatalf("list total=%d len=%d", total, len(list))
+	}
+	if _, err := s.GetAuditLog("missing"); err != ErrNotFound {
+		t.Fatalf("got %v", err)
+	}
+}

@@ -56,7 +56,14 @@ func New(deps Dependencies) (*Server, error) {
 		r.GET(deps.Config.Metrics.Path, metrics.Handler())
 	}
 
-	up, err := proxy.New(deps.Config.Auth.UpstreamBase, deps.Auth, deps.Log)
+	up, err := proxy.NewWithOptions(proxy.Options{
+		BaseURL:      deps.Config.Auth.UpstreamBase,
+		Tokens:       deps.Auth,
+		Log:          deps.Log,
+		Auditor:      deps.Store,
+		AuditEnabled: deps.Config.Audit.Enabled,
+		MaxBodyBytes: deps.Config.Audit.MaxBodyBytes,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -71,8 +78,7 @@ func New(deps Dependencies) (*Server, error) {
 	v1.Use(middleware.APIKeyAuth(deps.Store))
 	v1.Use(rl.Middleware())
 	{
-		// Explicit routes + catch-all for other OpenAI-compatible paths.
-		// Gin matches the most specific route first.
+		// Explicit routes for OpenAI-compatible paths.
 		v1.POST("/chat/completions", up.Handler())
 		v1.GET("/models", up.Handler())
 		v1.POST("/completions", up.Handler())
@@ -88,6 +94,8 @@ func New(deps Dependencies) (*Server, error) {
 		ad.GET("/keys", adminH.ListKeys)
 		ad.DELETE("/keys/:id", adminH.RevokeKey)
 		ad.POST("/reload-auth", adminH.ReloadAuth)
+		ad.GET("/audit", adminH.ListAudit)
+		ad.GET("/audit/:id", adminH.GetAudit)
 	}
 
 	srv := &http.Server{

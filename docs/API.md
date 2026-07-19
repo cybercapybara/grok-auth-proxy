@@ -502,6 +502,8 @@ curl -sS -X DELETE "http://localhost:8080/admin/keys/a1b2c3d4e5f6789012345678abc
 
 Re-read `auth.json` from disk into memory. Does **not** perform OIDC token refresh by itself (refresh happens on demand via `GetAccessToken` / force-refresh after upstream 401).
 
+On startup the process prefers an `auth_states` row in the database (if present) over the bootstrap file, so restarts without PVC keep the last refreshed token.
+
 ```bash
 curl -sS -X POST http://localhost:8080/admin/reload-auth \
   -H "Authorization: Bearer $ADMIN_KEY" | jq .
@@ -524,6 +526,71 @@ curl -sS -X POST http://localhost:8080/admin/reload-auth \
   "detail": "parse auth file: unexpected end of JSON input"
 }
 ```
+
+### `GET /admin/audit`
+
+List proxied request/response audit entries (newest first). Requires admin auth.
+
+**Query parameters**
+
+| Param | Description |
+|-------|-------------|
+| `limit` | Page size (default 50, max 500) |
+| `offset` | Offset |
+| `api_key_id` | Filter by client API key id |
+| `path` | Exact path, e.g. `/v1/chat/completions` |
+| `model` | Exact model id from request body |
+| `status_min` / `status_max` | HTTP status range |
+| `from` / `to` | RFC3339 timestamps |
+
+```bash
+curl -sS "http://localhost:8080/admin/audit?limit=20&path=/v1/chat/completions" \
+  -H "Authorization: Bearer $ADMIN_KEY" | jq .
+```
+
+**200**
+
+```json
+{
+  "total": 1,
+  "limit": 20,
+  "offset": 0,
+  "items": [
+    {
+      "id": "…",
+      "created_at": "2026-07-19T04:00:00Z",
+      "request_id": "…",
+      "api_key_id": "…",
+      "api_key_name": "roocode",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "status_code": 200,
+      "latency_ms": 842,
+      "model": "grok-4.5",
+      "stream": false,
+      "request_body": "{\"model\":\"grok-4.5\",…}",
+      "response_body": "{\"id\":\"…\",…}",
+      "request_truncated": false,
+      "response_truncated": false
+    }
+  ]
+}
+```
+
+Bodies are truncated at `GAP_AUDIT_MAX_BODY_BYTES` (default 64 KiB) per side. Streaming responses store the first N bytes only.
+
+Disable with `GAP_AUDIT_ENABLED=false`.
+
+### `GET /admin/audit/:id`
+
+Fetch a single audit row (full stored bodies).
+
+```bash
+curl -sS "http://localhost:8080/admin/audit/$ID" \
+  -H "Authorization: Bearer $ADMIN_KEY" | jq .
+```
+
+**404** if unknown id.
 
 ### Admin unauthorized
 
@@ -611,6 +678,8 @@ Default allowed origins: `*` (configurable via `cors.allowed_origins`).
 | `GET` | `/admin/keys` | Admin | List keys |
 | `DELETE` | `/admin/keys/:id` | Admin | Revoke key |
 | `POST` | `/admin/reload-auth` | Admin | Reload `auth.json` from disk |
+| `GET` | `/admin/audit` | Admin | List request/response audit logs |
+| `GET` | `/admin/audit/:id` | Admin | Get one audit entry |
 
 ---
 

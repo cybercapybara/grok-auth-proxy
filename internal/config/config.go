@@ -18,6 +18,13 @@ type Config struct {
 	CORS      CORSConfig      `mapstructure:"cors"`
 	Log       LogConfig       `mapstructure:"log"`
 	Metrics   MetricsConfig   `mapstructure:"metrics"`
+	Audit     AuditConfig     `mapstructure:"audit"`
+}
+
+// AuditConfig controls request/response audit logging to the database.
+type AuditConfig struct {
+	Enabled      bool `mapstructure:"enabled"`
+	MaxBodyBytes int  `mapstructure:"max_body_bytes"`
 }
 
 type ServerConfig struct {
@@ -101,6 +108,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("log.redact", true)
 	v.SetDefault("metrics.enabled", true)
 	v.SetDefault("metrics.path", "/metrics")
+	v.SetDefault("audit.enabled", true)
+	v.SetDefault("audit.max_body_bytes", 65536)
 }
 
 func bindFlags(v *viper.Viper) {
@@ -140,6 +149,8 @@ func bindEnv(v *viper.Viper) {
 	_ = v.BindEnv("log.redact", "GAP_LOG_REDACT")
 	_ = v.BindEnv("metrics.enabled", "GAP_METRICS_ENABLED")
 	_ = v.BindEnv("metrics.path", "GAP_METRICS_PATH")
+	_ = v.BindEnv("audit.enabled", "GAP_AUDIT_ENABLED")
+	_ = v.BindEnv("audit.max_body_bytes", "GAP_AUDIT_MAX_BODY_BYTES")
 	_ = v.BindEnv("config", "GAP_CONFIG")
 }
 
@@ -170,6 +181,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Auth.RefreshSkew <= 0 {
 		c.Auth.RefreshSkew = 5 * time.Minute
+	}
+	if c.Audit.MaxBodyBytes <= 0 {
+		c.Audit.MaxBodyBytes = 65536
 	}
 	// Strip trailing slash from upstream base for consistent path join.
 	c.Auth.UpstreamBase = strings.TrimRight(c.Auth.UpstreamBase, "/")

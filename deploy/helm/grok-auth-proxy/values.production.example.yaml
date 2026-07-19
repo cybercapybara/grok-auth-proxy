@@ -1,10 +1,19 @@
-# Example production overrides. Copy to a private path (not committed), e.g.:
+# Example production overrides (no PVC, external Postgres).
+# Copy outside the repo:
 #   cp values.production.example.yaml ~/secrets/grok-auth-proxy-values.yaml
-#   helm upgrade --install grok-auth-proxy . -n <ns> -f ~/secrets/grok-auth-proxy-values.yaml
+#   helm upgrade --install grok-auth-proxy . -n <ns> \
+#     -f ~/secrets/grok-auth-proxy-values.yaml
 #
-# Do not put real hostnames, IPs, or cluster-specific names in this repository.
+# Required Secrets (create separately):
+#   kubectl create secret generic grok-auth-proxy-admin --from-literal=admin-key='…'
+#   kubectl create secret generic grok-auth-proxy-auth --from-file=auth.json=./auth.json
+#   kubectl create secret generic grok-auth-proxy-db \
+#     --from-literal=dsn='host=… user=… password=… dbname=… port=5432 sslmode=require'
 
 replicaCount: 1
+
+strategy:
+  type: RollingUpdate
 
 image:
   repository: example.com/grok-auth-proxy
@@ -18,36 +27,39 @@ admin:
 auth:
   existingSecret: grok-auth-proxy-auth
   secretKey: auth.json
-  seedToDataVolume: true
+  # Mount Secret at config.authFile; do not use PVC.
+  seedToDataVolume: false
+
+database:
+  existingSecret: grok-auth-proxy-db
+  secretKey: dsn
 
 config:
   serverAddr: ":8080"
-  authFile: /data/auth.json
+  authFile: /config/auth.json
   upstreamBase: https://api.x.ai/v1
   refreshSkew: 5m
-  dbDriver: sqlite
-  dbDsn: /data/proxy.db
+  dbDriver: postgres
+  # Overridden by database.existingSecret when set.
+  dbDsn: ""
   rateLimitRps: "20"
   rateLimitBurst: "40"
   logLevel: info
   logRedact: "true"
   metricsEnabled: "true"
+  auditEnabled: "true"
+  auditMaxBodyBytes: "65536"
 
 persistence:
-  enabled: true
-  storageClass: "" # e.g. your cluster StorageClass
-  accessModes:
-    - ReadWriteOnce
-  size: 2Gi
+  enabled: false
 
 ingress:
   enabled: true
   className: nginx
   annotations:
     # cert-manager.io/cluster-issuer: letsencrypt-prod
-    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    # nginx.ingress.kubernetes.io/backend-protocol: HTTP
-    # SSE / long-lived chat streams
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: HTTP
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"

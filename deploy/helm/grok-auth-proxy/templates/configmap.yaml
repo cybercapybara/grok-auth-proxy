@@ -16,9 +16,13 @@ data:
   GAP_AUTH_CLIENT_ID: {{ .Values.config.clientId | quote }}
   {{- end }}
   GAP_DB_DRIVER: {{ .Values.config.dbDriver | quote }}
+  {{- if not .Values.database.existingSecret }}
   GAP_DB_DSN: {{ .Values.config.dbDsn | quote }}
+  {{- end }}
   GAP_RATE_LIMIT_RPS: {{ .Values.config.rateLimitRps | quote }}
   GAP_RATE_LIMIT_BURST: {{ .Values.config.rateLimitBurst | quote }}
   GAP_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   GAP_LOG_REDACT: {{ .Values.config.logRedact | quote }}
   GAP_METRICS_ENABLED: {{ .Values.config.metricsEnabled | quote }}
+  GAP_AUDIT_ENABLED: {{ .Values.config.auditEnabled | default "true" | quote }}
+  GAP_AUDIT_MAX_BODY_BYTES: {{ .Values.config.auditMaxBodyBytes | default "65536" | quote }}

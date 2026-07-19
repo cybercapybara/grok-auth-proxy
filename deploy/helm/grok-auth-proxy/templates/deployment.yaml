@@ -7,7 +7,7 @@ metadata:
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
-    type: Recreate
+    type: {{ .Values.strategy.type | default "RollingUpdate" }}
   selector:
     matchLabels:
       {{- include "grok-auth-proxy.selectorLabels" . | nindent 6 }}
@@ -32,7 +32,7 @@ spec:
       securityContext:
         fsGroup: 65532
         fsGroupChangePolicy: OnRootMismatch
-      {{- if and .Values.auth.existingSecret .Values.auth.seedToDataVolume }}
+      {{- if and .Values.auth.existingSecret .Values.auth.seedToDataVolume .Values.persistence.enabled }}
       initContainers:
         - name: seed-auth
           image: busybox:1.37
@@ -81,12 +81,27 @@ spec:
                 secretKeyRef:
                   name: {{ if .Values.admin.existingSecret }}{{ .Values.admin.existingSecret }}{{ else }}{{ include "grok-auth-proxy.fullname" . }}-admin{{ end }}
                   key: {{ .Values.admin.secretKey }}
+            {{- if .Values.database.existingSecret }}
+            - name: GAP_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.secretKey | default "dsn" }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
+            {{- if or .Values.persistence.enabled .Values.auth.seedToDataVolume }}
             - name: data
               mountPath: /data
+            {{- end }}
+            {{- if and .Values.auth.existingSecret (not .Values.auth.seedToDataVolume) }}
+            - name: auth
+              mountPath: {{ .Values.config.authFile }}
+              subPath: auth.json
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
           livenessProbe:
@@ -112,6 +127,7 @@ spec:
             capabilities:
               drop: ["ALL"]
       volumes:
+        {{- if or .Values.persistence.enabled .Values.auth.seedToDataVolume }}
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
@@ -119,10 +135,19 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- end }}
         - name: tmp
           emptyDir: {}
         {{- if and .Values.auth.existingSecret .Values.auth.seedToDataVolume }}
         - name: auth-bootstrap
+          secret:
+            secretName: {{ .Values.auth.existingSecret }}
+            items:
+              - key: {{ .Values.auth.secretKey }}
+                path: auth.json
+        {{- end }}
+        {{- if and .Values.auth.existingSecret (not .Values.auth.seedToDataVolume) }}
+        - name: auth
           secret:
             secretName: {{ .Values.auth.existingSecret }}
             items:
