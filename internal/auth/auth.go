@@ -49,6 +49,12 @@ type FileData map[string]Entry
 // Use it to store credentials in an external DB when the auth file is read-only.
 type PersistFunc func(data FileData) error
 
+// Metrics is optional instrumentation for token state and refresh outcomes.
+type Metrics interface {
+	SetAuthState(ready bool, expiresAt time.Time, hasRefresh bool)
+	IncAuthRefresh(success bool)
+}
+
 // Manager loads, refreshes, and watches Grok auth.json credentials.
 type Manager struct {
 	path         string
@@ -59,6 +65,7 @@ type Manager struct {
 	httpClient   *http.Client
 	log          *zap.Logger
 	persist      PersistFunc
+	metrics      Metrics
 	fileWritable bool // false for read-only secret mounts; DB Persist is enough
 
 	mu            sync.RWMutex
@@ -88,6 +95,7 @@ type Options struct {
 	// InitialData, if non-empty, is loaded instead of reading Path first
 	// (e.g. auth blob restored from Postgres).
 	InitialData []byte
+	Metrics     Metrics
 }
 
 // NewManager creates a Manager and loads credentials from disk.
@@ -118,6 +126,7 @@ func NewManager(opts Options) (*Manager, error) {
 		httpClient:   opts.HTTPClient,
 		log:          opts.Log,
 		persist:      opts.Persist,
+		metrics:      opts.Metrics,
 		fileWritable: writable,
 		stopCh:       make(chan struct{}),
 	}
@@ -139,6 +148,7 @@ func NewManager(opts Options) (*Manager, error) {
 	} else if err := m.Reload(); err != nil {
 		return nil, err
 	}
+	m.publishMetrics()
 	return m, nil
 }
 
@@ -263,7 +273,20 @@ func (m *Manager) loadBytes(data []byte) error {
 		zap.Time("expires_at", entry.ExpiresAt),
 		zap.String("auth_mode", entry.AuthMode),
 	)
+	m.publishMetrics()
 	return nil
+}
+
+func (m *Manager) publishMetrics() {
+	if m.metrics == nil {
+		return
+	}
+	m.mu.RLock()
+	ready := strings.TrimSpace(m.entry.Key) != ""
+	exp := m.entry.ExpiresAt
+	hasRefresh := strings.TrimSpace(m.entry.RefreshToken) != ""
+	m.mu.RUnlock()
+	m.metrics.SetAuthState(ready, exp, hasRefresh)
 }
 
 func selectEntry(fd FileData, account string) (string, Entry, error) {
@@ -343,8 +366,65 @@ func (m *Manager) ForceRefresh(ctx context.Context) error {
 	return m.Refresh(ctx)
 }
 
+// StartProactiveRefresh periodically refreshes the access token before expiry
+// so idle services do not wake up with a dead token and no scrape-driven refresh.
+func (m *Manager) StartProactiveRefresh(interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		// Run once soon after start.
+		m.proactiveTick()
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-m.stopCh:
+				return
+			case <-t.C:
+				m.proactiveTick()
+			}
+		}
+	}()
+}
+
+func (m *Manager) proactiveTick() {
+	m.publishMetrics()
+	m.mu.RLock()
+	exp := m.entry.ExpiresAt
+	skew := m.refreshSkew
+	m.mu.RUnlock()
+	if exp.IsZero() {
+		return
+	}
+	// Refresh when within 2× skew of expiry (default ~10m), or already expired.
+	if time.Now().Add(2 * skew).Before(exp) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := m.Refresh(ctx); err != nil {
+		m.log.Warn("proactive token refresh failed", zap.Error(err), zap.Time("expires_at", exp))
+		return
+	}
+	m.log.Info("proactive token refresh ok", zap.Time("expires_at", m.ExpiresAt()))
+}
+
 // Refresh exchanges the refresh_token for a new access token.
 func (m *Manager) Refresh(ctx context.Context) error {
+	err := m.refresh(ctx)
+	if m.metrics != nil {
+		m.metrics.IncAuthRefresh(err == nil)
+	}
+	if err == nil {
+		m.publishMetrics()
+	}
+	return err
+}
+
+func (m *Manager) refresh(ctx context.Context) error {
 	m.mu.Lock()
 	// Serialize refreshes
 	entry := m.entry

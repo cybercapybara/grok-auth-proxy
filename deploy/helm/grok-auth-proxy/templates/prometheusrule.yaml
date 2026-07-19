@@ -21,8 +21,62 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: "grok-auth-proxy is down"
-            description: "Prometheus cannot scrape grok-auth-proxy in namespace {{ .Release.Namespace }} for more than 2 minutes."
+            summary: "grok-auth-proxy is down / not scraped"
+            description: "Prometheus cannot scrape grok-auth-proxy in {{ .Release.Namespace }} for >2m."
+
+        - alert: GrokAuthTokenExpired
+          expr: |
+            gap_auth_token_seconds_remaining{namespace="{{ .Release.Namespace }}", job="{{ include "grok-auth-proxy.fullname" . }}"} < 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Grok access token EXPIRED"
+            description: "gap_auth_token_seconds_remaining is negative. Proactive refresh failed or no refresh_token. Clients will get upstream 401/503."
+
+        - alert: GrokAuthTokenExpiringSoon
+          expr: |
+            gap_auth_token_seconds_remaining{namespace="{{ .Release.Namespace }}", job="{{ include "grok-auth-proxy.fullname" . }}"} < 900
+            and
+            gap_auth_token_seconds_remaining{namespace="{{ .Release.Namespace }}", job="{{ include "grok-auth-proxy.fullname" . }}"} >= 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Grok access token expires in <15m"
+            description: "Token remaining {{`{{ $value | humanizeDuration }}`}}. If refresh keeps failing, it will go critical."
+
+        - alert: GrokAuthNoRefreshToken
+          expr: |
+            gap_auth_token_has_refresh{namespace="{{ .Release.Namespace }}", job="{{ include "grok-auth-proxy.fullname" . }}"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No Grok refresh_token loaded"
+            description: "Cannot renew access token. Re-seed auth.json / auth_states from a valid Grok CLI login."
+
+        - alert: GrokAuthRefreshFailing
+          expr: |
+            increase(gap_auth_refresh_total{namespace="{{ .Release.Namespace }}", job="{{ include "grok-auth-proxy.fullname" . }}", result="error"}[30m]) >= 3
+            and
+            increase(gap_auth_refresh_total{namespace="{{ .Release.Namespace }}", job="{{ include "grok-auth-proxy.fullname" . }}", result="success"}[30m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Grok OIDC refresh failing"
+            description: ">=3 refresh errors in 30m with no success. Token will die at expiry; re-login Grok CLI and update Secret/DB."
+
+        - alert: GrokAuthNotReady
+          expr: |
+            gap_auth_ready{namespace="{{ .Release.Namespace }}", job="{{ include "grok-auth-proxy.fullname" . }}"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "grok-auth-proxy has no access token"
+            description: "gap_auth_ready=0 for 2m."
 
         - alert: GrokAuthProxyHighErrorRate
           expr: |

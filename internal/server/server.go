@@ -31,10 +31,11 @@ type Server struct {
 
 // Dependencies bundles constructor inputs.
 type Dependencies struct {
-	Config *config.Config
-	Log    *zap.Logger
-	Auth   *auth.Manager
-	Store  *store.Store
+	Config  *config.Config
+	Log     *zap.Logger
+	Auth    *auth.Manager
+	Store   *store.Store
+	Metrics *metrics.Metrics // optional; when nil and Metrics.Enabled, created here
 }
 
 // New builds the HTTP server.
@@ -49,9 +50,11 @@ func New(deps Dependencies) (*Server, error) {
 	r.Use(middleware.AccessLog(deps.Log, deps.Config.Log.Redact))
 	r.Use(middleware.CORS(deps.Config.CORS.AllowedOrigins))
 
-	var m *metrics.Metrics
+	m := deps.Metrics
 	if deps.Config.Metrics.Enabled {
-		m = metrics.New()
+		if m == nil {
+			m = metrics.New()
+		}
 		r.Use(m.Middleware())
 		r.GET(deps.Config.Metrics.Path, metrics.Handler())
 	}

@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	"github.com/moveeeax/grok-auth-proxy/internal/auth"
 	"github.com/moveeeax/grok-auth-proxy/internal/config"
+	"github.com/moveeeax/grok-auth-proxy/internal/metrics"
 	"github.com/moveeeax/grok-auth-proxy/internal/server"
 	"github.com/moveeeax/grok-auth-proxy/internal/store"
 )
@@ -60,6 +62,11 @@ func run() error {
 		}
 	}
 
+	var met *metrics.Metrics
+	if cfg.Metrics.Enabled {
+		met = metrics.New()
+	}
+
 	authMgr, err := auth.NewManager(auth.Options{
 		Path:        cfg.Auth.File,
 		Issuer:      cfg.Auth.Issuer,
@@ -68,6 +75,7 @@ func run() error {
 		RefreshSkew: cfg.Auth.RefreshSkew,
 		Log:         log.Named("auth"),
 		InitialData: initial,
+		Metrics:     met,
 		Persist: func(data auth.FileData) error {
 			b, err := json.MarshalIndent(data, "", "  ")
 			if err != nil {
@@ -92,13 +100,16 @@ func run() error {
 	if err := authMgr.StartWatch(); err != nil {
 		log.Warn("auth file watch disabled", zap.Error(err))
 	}
+	// Refresh before expiry even with no traffic (avoids silent dead tokens).
+	authMgr.StartProactiveRefresh(time.Minute)
 	defer func() { _ = authMgr.Close() }()
 
 	srv, err := server.New(server.Dependencies{
-		Config: cfg,
-		Log:    log,
-		Auth:   authMgr,
-		Store:  st,
+		Config:  cfg,
+		Log:     log,
+		Auth:    authMgr,
+		Store:   st,
+		Metrics: met,
 	})
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
