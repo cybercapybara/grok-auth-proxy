@@ -51,14 +51,15 @@ type PersistFunc func(data FileData) error
 
 // Manager loads, refreshes, and watches Grok auth.json credentials.
 type Manager struct {
-	path        string
-	issuer      string
-	clientID    string
-	account     string
-	refreshSkew time.Duration
-	httpClient  *http.Client
-	log         *zap.Logger
-	persist     PersistFunc
+	path         string
+	issuer       string
+	clientID     string
+	account      string
+	refreshSkew  time.Duration
+	httpClient   *http.Client
+	log          *zap.Logger
+	persist      PersistFunc
+	fileWritable bool // false for read-only secret mounts; DB Persist is enough
 
 	mu            sync.RWMutex
 	mapKey        string
@@ -81,10 +82,11 @@ type Options struct {
 	RefreshSkew time.Duration
 	HTTPClient  *http.Client
 	Log         *zap.Logger
-	// Persist is optional; invoked after refresh (and best-effort file write).
+	// Persist is optional; invoked after refresh (e.g. save to Postgres).
+	// When set and the auth file is read-only (K8s Secret), file write-back is skipped.
 	Persist PersistFunc
 	// InitialData, if non-empty, is loaded instead of reading Path first
-	// (e.g. auth blob restored from Postgres). Path is still used for later writes/watch.
+	// (e.g. auth blob restored from Postgres).
 	InitialData []byte
 }
 
@@ -106,25 +108,33 @@ func NewManager(opts Options) (*Manager, error) {
 		opts.Issuer = "https://auth.x.ai"
 	}
 
+	writable := authPathWritable(opts.Path)
 	m := &Manager{
-		path:        opts.Path,
-		issuer:      strings.TrimRight(opts.Issuer, "/"),
-		clientID:    opts.ClientID,
-		account:     opts.Account,
-		refreshSkew: opts.RefreshSkew,
-		httpClient:  opts.HTTPClient,
-		log:         opts.Log,
-		persist:     opts.Persist,
-		stopCh:      make(chan struct{}),
+		path:         opts.Path,
+		issuer:       strings.TrimRight(opts.Issuer, "/"),
+		clientID:     opts.ClientID,
+		account:      opts.Account,
+		refreshSkew:  opts.RefreshSkew,
+		httpClient:   opts.HTTPClient,
+		log:          opts.Log,
+		persist:      opts.Persist,
+		fileWritable: writable,
+		stopCh:       make(chan struct{}),
+	}
+	if !writable {
+		m.log.Info("auth file is not writable; refresh will use Persist only (no file write-back)",
+			zap.String("path", opts.Path))
 	}
 
 	if len(opts.InitialData) > 0 {
 		if err := m.loadBytes(opts.InitialData); err != nil {
 			return nil, err
 		}
-		// Best-effort materialize to path so watchers / admins see current state.
-		if err := writeAuthFileAtomic(m.path, m.fileData); err != nil {
-			m.log.Debug("could not write initial auth data to file", zap.Error(err))
+		// Only materialize to disk when the path is writable (local/dev).
+		if m.fileWritable {
+			if err := writeAuthFileAtomic(m.path, m.fileData); err != nil {
+				m.log.Debug("could not write initial auth data to file", zap.Error(err))
+			}
 		}
 	} else if err := m.Reload(); err != nil {
 		return nil, err
@@ -416,25 +426,56 @@ func (m *Manager) Refresh(ctx context.Context) error {
 		}
 	}
 
-	if err := writeAuthFileAtomic(m.path, fdCopy); err != nil {
+	// K8s Secret mounts are read-only: never attempt atomic write there.
+	// Source of truth with Persist is the database (auth_states).
+	if m.fileWritable {
+		if err := writeAuthFileAtomic(m.path, fdCopy); err != nil {
+			m.mu.Lock()
+			m.writing = false
+			m.mu.Unlock()
+			m.log.Warn("failed to write refreshed auth.json", zap.Error(err))
+			m.log.Info("access token refreshed", zap.Time("expires_at", newEntry.ExpiresAt))
+			return nil
+		}
+		// Brief delay so fsnotify can see our write and we ignore it
+		time.AfterFunc(500*time.Millisecond, func() {
+			m.mu.Lock()
+			m.writing = false
+			m.mu.Unlock()
+		})
+	} else {
 		m.mu.Lock()
 		m.writing = false
 		m.mu.Unlock()
-		m.log.Warn("failed to write refreshed auth.json", zap.Error(err))
-		// In-memory (+ optional DB) update still applied
-		m.log.Info("access token refreshed", zap.Time("expires_at", newEntry.ExpiresAt))
-		return nil
 	}
-
-	// Brief delay so fsnotify can see our write and we ignore it
-	time.AfterFunc(500*time.Millisecond, func() {
-		m.mu.Lock()
-		m.writing = false
-		m.mu.Unlock()
-	})
 
 	m.log.Info("access token refreshed", zap.Time("expires_at", newEntry.ExpiresAt))
 	return nil
+}
+
+// authPathWritable reports whether atomic write-back of path is possible.
+// K8s Secret subPath mounts are typically read-only files (parent dir may still be RW).
+func authPathWritable(path string) bool {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." {
+		dir = "."
+	}
+	tmp, err := os.CreateTemp(dir, ".auth-writetest-*")
+	if err != nil {
+		return false
+	}
+	name := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(name)
+
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			return false
+		}
+		_ = f.Close()
+	}
+	return true
 }
 
 type tokenResponse struct {
