@@ -81,3 +81,11 @@ resources:
   limits:
     cpu: "1"
     memory: 512Mi
+
+serviceMonitor:
+  enabled: true
+  path: /metrics
+  interval: 30s
+
+prometheusRule:
+  enabled: true

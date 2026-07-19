@@ -103,3 +103,16 @@ affinity: {}
 
 # Extra env vars
 extraEnv: []
+
+# Prometheus Operator ServiceMonitor (scrapes /metrics on port http).
+serviceMonitor:
+  enabled: true
+  path: /metrics
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# Basic alerting rules for the app.
+prometheusRule:
+  enabled: true
+  labels: {}
