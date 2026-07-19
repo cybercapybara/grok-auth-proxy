@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCreateValidateRevoke(t *testing.T) {
@@ -108,9 +109,18 @@ func TestAuthStateAndAudit(t *testing.T) {
 	if row.ID == "" {
 		t.Fatal("expected id")
 	}
-	one, err := s.GetAuditLog(row.ID)
-	if err != nil {
-		t.Fatal(err)
+	// Workers write async; wait briefly.
+	var one *AuditLog
+	var getErr error
+	for i := 0; i < 50; i++ {
+		one, getErr = s.GetAuditLog(row.ID)
+		if getErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if getErr != nil {
+		t.Fatal(getErr)
 	}
 	if one.Model != "grok-4.5" {
 		t.Fatalf("model=%s", one.Model)

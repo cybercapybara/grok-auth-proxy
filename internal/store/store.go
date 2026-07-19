@@ -37,7 +37,12 @@ const (
 	// Throttle last_used_at writes so hot keys do not UPDATE on every RPS spike.
 	lastUsedMinInterval = 60 * time.Second
 	// Keep probes snappy even if the pool is busy.
-	pingTimeout = 500 * time.Millisecond
+	pingTimeout = 400 * time.Millisecond
+	// Soft readiness: tolerate brief pool pressure after a recent successful ping.
+	dbOKGrace = 45 * time.Second
+
+	auditQueueSize   = 4096
+	auditWorkers     = 2
 )
 
 // APIKey is the persisted API key record. The plaintext key is never stored.
@@ -119,6 +124,13 @@ type Store struct {
 
 	cacheMu sync.RWMutex
 	cache   map[string]*keyCacheEntry // lookup hash → entry
+
+	auditCh   chan *AuditLog
+	auditStop chan struct{}
+	auditWG   sync.WaitGroup
+
+	dbOKMu   sync.RWMutex
+	dbLastOK time.Time
 }
 
 // Open opens a SQLite or PostgreSQL database and runs migrations.
@@ -166,14 +178,23 @@ func Open(driver, dsn string) (*Store, error) {
 	if err := db.AutoMigrate(&APIKey{}, &AuthState{}, &AuditLog{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{
-		db:    db,
-		cache: make(map[string]*keyCacheEntry),
-	}, nil
+	s := &Store{
+		db:        db,
+		cache:     make(map[string]*keyCacheEntry),
+		auditCh:   make(chan *AuditLog, auditQueueSize),
+		auditStop: make(chan struct{}),
+		dbLastOK:  time.Now().UTC(),
+	}
+	s.startAuditWorkers(auditWorkers)
+	return s, nil
 }
 
-// Close closes the underlying DB.
+// Close stops audit workers and closes the underlying DB.
 func (s *Store) Close() error {
+	if s.auditStop != nil {
+		close(s.auditStop)
+		s.auditWG.Wait()
+	}
 	sqlDB, err := s.db.DB()
 	if err != nil {
 		return err
@@ -190,7 +211,74 @@ func (s *Store) Ping() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()
-	return sqlDB.PingContext(ctx)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return err
+	}
+	s.dbOKMu.Lock()
+	s.dbLastOK = time.Now().UTC()
+	s.dbOKMu.Unlock()
+	return nil
+}
+
+// Healthy reports whether the DB is currently reachable, or was recently OK
+// (so brief pool saturation during load does not flap readiness).
+func (s *Store) Healthy() bool {
+	s.dbOKMu.RLock()
+	last := s.dbLastOK
+	s.dbOKMu.RUnlock()
+	// Skip ping if we succeeded recently — probes must stay cheap under load.
+	if !last.IsZero() && time.Since(last) < 10*time.Second {
+		return true
+	}
+	if err := s.Ping(); err == nil {
+		return true
+	}
+	return !last.IsZero() && time.Since(last) < dbOKGrace
+}
+
+func (s *Store) startAuditWorkers(n int) {
+	if n < 1 {
+		n = 1
+	}
+	for i := 0; i < n; i++ {
+		s.auditWG.Add(1)
+		go func() {
+			defer s.auditWG.Done()
+			for {
+				select {
+				case <-s.auditStop:
+					// Drain remaining queued rows best-effort.
+					for {
+						select {
+						case row := <-s.auditCh:
+							_ = s.insertAuditLogSync(row)
+						default:
+							return
+						}
+					}
+				case row := <-s.auditCh:
+					_ = s.insertAuditLogSync(row)
+				}
+			}
+		}()
+	}
+}
+
+func (s *Store) insertAuditLogSync(row *AuditLog) error {
+	if row == nil {
+		return nil
+	}
+	if row.ID == "" {
+		id, err := randomHex(16)
+		if err != nil {
+			return err
+		}
+		row.ID = id
+	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now().UTC()
+	}
+	return s.db.Create(row).Error
 }
 
 // CreateKey generates a new API key.
@@ -379,6 +467,9 @@ func (s *Store) LoadAuthState() ([]byte, time.Time, error) {
 }
 
 // InsertAuditLog persists one audit row.
+// InsertAuditLog enqueues a row for background writers.
+// Non-blocking: if the queue is full the event is dropped so request path
+// never waits on Postgres under load.
 func (s *Store) InsertAuditLog(row *AuditLog) error {
 	if row == nil {
 		return errors.New("nil audit log")
@@ -393,7 +484,17 @@ func (s *Store) InsertAuditLog(row *AuditLog) error {
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now().UTC()
 	}
-	return s.db.Create(row).Error
+	if s.auditCh == nil {
+		// Tests / early paths without workers: write sync.
+		return s.insertAuditLogSync(row)
+	}
+	select {
+	case s.auditCh <- row:
+		return nil
+	default:
+		// Drop rather than block the proxy.
+		return nil
+	}
 }
 
 // GetAuditLog returns one audit entry by id.

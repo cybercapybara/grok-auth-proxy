@@ -243,12 +243,10 @@ func (u *Upstream) recordAudit(
 		}
 	}
 
-	// Async insert so streaming clients are not blocked on DB.
-	go func() {
-		if err := u.auditor.InsertAuditLog(row); err != nil {
-			u.log.Warn("audit insert failed", zap.Error(err))
-		}
-	}()
+	// Non-blocking enqueue (store drops when overloaded).
+	if err := u.auditor.InsertAuditLog(row); err != nil {
+		u.log.Warn("audit insert failed", zap.Error(err))
+	}
 }
 
 func readLimited(r io.Reader, max int) ([]byte, bool, error) {

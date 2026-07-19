@@ -110,9 +110,9 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            # Health is cheap; still give headroom under GC/load so probe does not kill the pod.
-            timeoutSeconds: 3
-            failureThreshold: 5
+            # Health must stay independent of DB; generous so GC/load cannot kill the pod.
+            timeoutSeconds: 5
+            failureThreshold: 6
           readinessProbe:
             httpGet:
               path: /ready
@@ -120,7 +120,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
-            failureThreshold: 3
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
