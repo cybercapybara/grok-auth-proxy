@@ -13,10 +13,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/cybercapybara/grok-auth-proxy/internal/auth"
-	"github.com/cybercapybara/grok-auth-proxy/internal/config"
-	"github.com/cybercapybara/grok-auth-proxy/internal/server"
-	"github.com/cybercapybara/grok-auth-proxy/internal/store"
+	"github.com/moveeeax/grok-auth-proxy/internal/auth"
+	"github.com/moveeeax/grok-auth-proxy/internal/config"
+	"github.com/moveeeax/grok-auth-proxy/internal/server"
+	"github.com/moveeeax/grok-auth-proxy/internal/store"
 )
 
 func TestE2EAdminAndProxy(t *testing.T) {

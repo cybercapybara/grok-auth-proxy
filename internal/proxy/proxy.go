@@ -14,9 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/cybercapybara/grok-auth-proxy/internal/auth"
-	"github.com/cybercapybara/grok-auth-proxy/internal/middleware"
-	"github.com/cybercapybara/grok-auth-proxy/internal/store"
+	"github.com/moveeeax/grok-auth-proxy/internal/auth"
+	"github.com/moveeeax/grok-auth-proxy/internal/middleware"
+	"github.com/moveeeax/grok-auth-proxy/internal/store"
 )
 
 // TokenProvider supplies upstream access tokens.

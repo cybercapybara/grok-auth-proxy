@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/cybercapybara/grok-auth-proxy/internal/auth"
-	"github.com/cybercapybara/grok-auth-proxy/internal/store"
+	"github.com/moveeeax/grok-auth-proxy/internal/auth"
+	"github.com/moveeeax/grok-auth-proxy/internal/store"
 )
 
 // Handler serves liveness and readiness probes.

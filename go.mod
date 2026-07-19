@@ -1,4 +1,4 @@
-module github.com/cybercapybara/grok-auth-proxy
+module github.com/moveeeax/grok-auth-proxy
 
 go 1.26.5
 
